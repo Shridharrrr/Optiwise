@@ -46,10 +46,12 @@ export function ChatBot() {
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputValue, setInputValue] = useState('');
     const [isTyping, setIsTyping] = useState(false);
+    const [isLoadingHistory, setIsLoadingHistory] = useState(false);
     const [isRecording, setIsRecording] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
     const recognitionRef = useRef<any>(null);
+    const historyFetched = useRef(false);
     const [isTTSEnabled, setIsTTSEnabled] = useState(false);
     const { mode, userProfile, user } = useMode();
 
@@ -145,18 +147,50 @@ export function ChatBot() {
         }
     }, [isOpen]);
 
-    // Add welcome message when chat opens for the first time
+    // Load history from Firestore when chat opens (only once per session)
     useEffect(() => {
-        if (isOpen && messages.length === 0) {
-            const welcomeMessage: Message = {
-                id: 'welcome',
-                role: 'assistant',
-                content: `Hey ${userProfile?.name || 'there'}! 👋 I'm your AI Learning Assistant. I'm here to help you stay on track with your ${mode === 'academic' ? 'academics' : 'skill-building journey'}!\n\nTry asking me:\n• "What's my schedule today?"\n• "Show my upcoming deadlines"\n• "How's my progress?"`,
-                timestamp: new Date(),
-            };
-            setMessages([welcomeMessage]);
-        }
-    }, [isOpen, messages.length, userProfile?.name, mode]);
+        if (!isOpen || historyFetched.current || !user?.uid) return;
+        historyFetched.current = true;
+
+        const loadHistory = async () => {
+            setIsLoadingHistory(true);
+            try {
+                const res = await fetch(`${API_BASE_URL}/chat/history/${user.uid}`);
+                if (!res.ok) throw new Error('Failed to load history');
+                const data = await res.json();
+
+                if (data.messages && data.messages.length > 0) {
+                    const restored: Message[] = data.messages.map((m: any, i: number) => ({
+                        id: `history-${i}`,
+                        role: m.role === 'human' ? 'user' : 'assistant',
+                        content: m.content,
+                        timestamp: new Date(m.ts),
+                    }));
+                    setMessages(restored);
+                } else {
+                    // No history — show welcome
+                    setMessages([{
+                        id: 'welcome',
+                        role: 'assistant',
+                        content: `Hey ${userProfile?.name || 'there'}! 👋 I'm your AI Learning Assistant. I'm here to help you stay on track with your ${mode === 'academic' ? 'academics' : 'skill-building journey'}!\n\nTry asking me:\n• "What's my schedule today?"\n• "Show my upcoming deadlines"\n• "How's my progress?"`,
+                        timestamp: new Date(),
+                    }]);
+                }
+            } catch {
+                // On error, just show welcome
+                setMessages([{
+                    id: 'welcome',
+                    role: 'assistant',
+                    content: `Hey ${userProfile?.name || 'there'}! 👋 I'm your AI Learning Assistant.`,
+                    timestamp: new Date(),
+                }]);
+            } finally {
+                setIsLoadingHistory(false);
+            }
+        };
+
+        loadHistory();
+    }, [isOpen, user?.uid, userProfile?.name, mode]);
 
     const handleSendMessage = async (content: string) => {
         if (!content.trim()) return;
@@ -182,7 +216,8 @@ export function ChatBot() {
                     message: content,
                     uid: user?.uid || 'anonymous',
                     mode: mode,
-                    user_name: userProfile?.name || 'Student'
+                    user_name: userProfile?.name || 'Student',
+                    session_id: 'default',
                 }),
             });
 
@@ -367,6 +402,15 @@ export function ChatBot() {
 
                         {/* Messages Area */}
                         <div className="flex-1 overflow-y-auto p-5 space-y-5 scrollbar-thin scrollbar-thumb-rounded-full scrollbar-track-transparent scrollbar-thumb-muted-foreground/20">
+                            {isLoadingHistory && (
+                                <div className="flex justify-center pt-4">
+                                    <div className="flex gap-1.5">
+                                        <span className={cn("h-2 w-2 rounded-full animate-bounce [animation-delay:-0.3s]", isAcademic ? "bg-blue-400" : "bg-primary/60")} />
+                                        <span className={cn("h-2 w-2 rounded-full animate-bounce [animation-delay:-0.15s]", isAcademic ? "bg-blue-400" : "bg-primary/60")} />
+                                        <span className={cn("h-2 w-2 rounded-full animate-bounce", isAcademic ? "bg-blue-400" : "bg-primary/60")} />
+                                    </div>
+                                </div>
+                            )}
                             {messages.map((message) => (
                                 <motion.div
                                     key={message.id}

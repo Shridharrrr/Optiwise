@@ -1,230 +1,404 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 from utils.llm import llm
+from utils.rag_utils import search_documents
 from firebase_admin import firestore
-from datetime import datetime
-from routes.planner import PlannerSettings, generate_plan, get_latest_plan # Reuse existing logic
+from datetime import datetime, timedelta
+from routes.planner import PlannerSettings, generate_plan
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 db = firestore.client()
+
+# How many previous turns to include for context
+HISTORY_TURNS = 10
+
 
 class ChatRequest(BaseModel):
     message: str
     uid: str
     mode: str = "academic"
     user_name: Optional[str] = "Student"
+    session_id: Optional[str] = "default"   # allows multiple chat sessions later
 
-# --- Tools ---
+
+# ---------------------------------------------------------------------------
+# History helpers
+# ---------------------------------------------------------------------------
+
+def _history_ref(uid: str, session_id: str):
+    return (
+        db.collection("user_profiles")
+        .document(uid)
+        .collection("chat_sessions")
+        .document(session_id)
+        .collection("messages")
+    )
+
+
+def _load_history(uid: str, session_id: str) -> list:
+    """
+    Fetch the last HISTORY_TURNS * 2 messages and convert them to
+    LangChain message objects (HumanMessage / AIMessage).
+    """
+    ref = _history_ref(uid, session_id)
+    docs = (
+        ref.order_by("ts", direction=firestore.Query.ASCENDING)
+        .limit_to_last(HISTORY_TURNS * 2)
+        .get()
+    )
+    messages = []
+    for doc in docs:
+        data = doc.to_dict()
+        role = data.get("role")
+        content = data.get("content", "")
+        if role == "human":
+            messages.append(HumanMessage(content=content))
+        elif role == "ai":
+            messages.append(AIMessage(content=content))
+    return messages
+
+
+def _save_turn(uid: str, session_id: str, user_msg: str, ai_msg: str):
+    """Persist a user + AI turn to Firestore."""
+    ref = _history_ref(uid, session_id)
+    now = datetime.utcnow()
+    ref.add({"role": "human", "content": user_msg, "ts": now})
+    # AI message gets +1ms so ordering by ts is always human → ai
+    ref.add({"role": "ai",    "content": ai_msg,   "ts": now + timedelta(milliseconds=1)})
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
 
 @tool
 async def get_my_schedule(uid: str) -> str:
-    """Fetch the latest study schedule/plan for the user."""
+    """Fetch the user's latest study schedule / plan."""
     try:
-        # We can reuse the logic from planner route, but need to handle async
-        # For simplicity, let's just query the DB directly here similar to the route
-        plans_ref = db.collection("user_profiles").document(uid).collection("generated_plans")
-        docs = plans_ref.order_by("created_at", direction=firestore.Query.DESCENDING).limit(1).get()
-        
+        plans_ref = (
+            db.collection("user_profiles")
+            .document(uid)
+            .collection("generated_plans")
+        )
+        docs = (
+            plans_ref
+            .order_by("created_at", direction=firestore.Query.DESCENDING)
+            .limit(1)
+            .get()
+        )
         if not docs:
             return "No schedule found. You haven't generated one yet."
-            
+
         data = docs[0].to_dict()
         schedule = data.get("schedule", [])
-        
-        # Format explicitly for the LLM
         if not schedule:
             return "Schedule is empty."
-            
-        formatted = "Here is the user's latest schedule:\n"
+
+        formatted = "Here is your latest schedule:\n"
         for day in schedule:
             formatted += f"Day: {day.get('day')} ({day.get('date')})\n"
-            for slot in day.get('slots', []):
-                formatted += f" - {slot.get('time')}: {slot.get('task')} ({slot.get('type')})\n"
+            for slot in day.get("slots", []):
+                formatted += (
+                    f"  - {slot.get('time')}: {slot.get('task')} ({slot.get('type')})\n"
+                )
             formatted += "\n"
         return formatted
     except Exception as e:
         return f"Error fetching schedule: {str(e)}"
 
+
 @tool
 async def generate_new_schedule(uid: str, instructions: str) -> str:
     """
-    Generate/Update a study schedule based on user instructions. 
-    instructions should contain things like 'start at 9am', 'focus on math', OR changes like 'switch Monday math to biology'.
-    Default behavior: Weekly schedule, 1 hour per day, based on subjects.
+    Generate or update a study schedule based on user instructions.
+    Pass any constraints such as 'start at 9am', 'focus on math', or
+    'switch Monday math to biology'. Defaults: weekly, 1 hour per day.
     """
     try:
-        # 1. Parse instructions to extract constraints/times using a quick LLM call or regex
-        # For now, we'll just pass the raw instructions as constraints
         settings = PlannerSettings(
             uid=uid,
-            available_hours=1, # Default as requested: 1 hr per day
+            available_hours=1,
             start_time="09:00",
             end_time="21:00",
             constraints=instructions,
-            view_mode="weekly" # Default as requested: weekly schedule
+            view_mode="weekly",
         )
-        
-        # 2. Call the generator
-        # Note: generate_plan is async, but tool might expect sync or we await it
-        result = await generate_plan(settings)
-        
-        return "New schedule generated successfully! Tell the user to check their planner/schedule view."
+        await generate_plan(settings)
+        return "New schedule generated! Tell the user to check their planner view."
     except Exception as e:
         return f"Failed to generate schedule: {str(e)}"
 
-@tool
-async def add_deadline(uid: str, title: str, date: str, subject: str = "General") -> str:
-    """
-    Add a new deadline/assignment. 
-    date should be YYYY-MM-DD format.
-    """
-    try:
-        deadline_data = {
-            "title": title,
-            "due_date": date,
-            "subject": subject,
-            "completed": False,
-            "created_at": datetime.utcnow().isoformat()
-        }
-        db.collection("user_profiles").document(uid).collection("deadlines").add(deadline_data)
-        return f"Added deadline: '{title}' for {subject} on {date}."
-    except Exception as e:
-        return f"Error adding deadline: {str(e)}"
 
 @tool
-async def add_exam(uid: str, title: str, date: str, subject: str = "General", topics: str = "") -> str:
+async def add_event(
+    uid: str,
+    title: str,
+    date: str,
+    subject: str = "General",
+    event_type: str = "deadline",
+    topics: str = "",
+) -> str:
     """
-    Add a new exam/midterm/test.
-    date should be YYYY-MM-DD format.
-    topics: Optional comma-separated list of syllabus topics.
+    Add any academic event for the user.
+
+    event_type options:
+      - "deadline"  → assignment, homework, project, or generic task
+      - "exam"      → exam, test, midterm, final, quiz
+
+    date must be in YYYY-MM-DD format.
+    topics (optional, comma-separated) lists syllabus topics — only for exams.
     """
     try:
-        # distinct logic for exams
-        syllabus_list = []
-        if topics:
-            syllabus_list = [{"name": t.strip(), "completed": False} for t in topics.split(",") if t.strip()]
-            
-        exam_data = {
-            "uid": uid,
-            "title": title,
-            "date": date,
-            "subject": subject,
-            "syllabus": syllabus_list,
-            "total_topics": len(syllabus_list),
-            "completed_topics": 0,
-            "created_at": datetime.utcnow().isoformat()
-        }
-        
-        # Add to 'exams' collection
-        doc_ref = db.collection("user_profiles").document(uid).collection("exams").add(exam_data)
-        return f"Added exam: '{title}' for {subject} on {date} with {len(syllabus_list)} topics."
+        user_ref = db.collection("user_profiles").document(uid)
+        now_iso = datetime.utcnow().isoformat()
+
+        if event_type == "exam":
+            syllabus_list = []
+            if topics:
+                syllabus_list = [
+                    {"name": t.strip(), "completed": False}
+                    for t in topics.split(",")
+                    if t.strip()
+                ]
+            exam_data = {
+                "uid": uid,
+                "title": title,
+                "date": date,
+                "subject": subject,
+                "syllabus": syllabus_list,
+                "total_topics": len(syllabus_list),
+                "completed_topics": 0,
+                "created_at": now_iso,
+            }
+            user_ref.collection("exams").add(exam_data)
+            return (
+                f"Added exam '{title}' for {subject} on {date}"
+                + (f" with {len(syllabus_list)} topics." if syllabus_list else ".")
+            )
+        else:
+            deadline_data = {
+                "title": title,
+                "due_date": date,
+                "subject": subject,
+                "completed": False,
+                "created_at": now_iso,
+            }
+            user_ref.collection("deadlines").add(deadline_data)
+            return f"Added deadline '{title}' for {subject} on {date}."
+
     except Exception as e:
-        return f"Error adding exam: {str(e)}"
+        return f"Error adding event: {str(e)}"
+
 
 @tool
 async def get_upcoming_deadlines(uid: str) -> str:
-    """Fetch upcoming deadlines."""
+    """Fetch the user's upcoming incomplete deadlines."""
     try:
-        deadlines_ref = db.collection("user_profiles").document(uid).collection("deadlines")
+        deadlines_ref = (
+            db.collection("user_profiles")
+            .document(uid)
+            .collection("deadlines")
+        )
         docs = deadlines_ref.where("completed", "==", False).stream()
-        
+
         deadlines = []
         for doc in docs:
             d = doc.to_dict()
-            deadlines.append(f"- {d.get('due_date')}: {d.get('title')} ({d.get('subject')})")
-            
+            deadlines.append(
+                f"  - {d.get('due_date')}: {d.get('title')} ({d.get('subject')})"
+            )
+
         if not deadlines:
             return "No upcoming deadlines found."
-            
         return "Upcoming Deadlines:\n" + "\n".join(deadlines)
     except Exception as e:
         return f"Error fetching deadlines: {str(e)}"
 
-# --- Agent System ---
+
+@tool
+async def search_my_notes(uid: str, query: str) -> str:
+    """
+    Search through the user's uploaded documents and notes for information
+    relevant to the query. Use this when the user asks about something that
+    could be in their study materials, notes, or uploaded PDFs.
+    """
+    try:
+        passages = search_documents(uid=uid, query=query, k=4)
+        if not passages:
+            return (
+                "No relevant information found in your documents. "
+                "You can upload study materials via the Documents section."
+            )
+        result = "Found relevant information from your notes:\n\n"
+        result += "\n\n---\n\n".join(passages)
+        return result
+    except Exception as e:
+        return f"Error searching notes: {str(e)}"
+
+
+# ---------------------------------------------------------------------------
+# Agent
+# ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """You are Optiwise, an intelligent academic assistant.
 Your goal is to help the student manage their studies, schedule, and deadlines.
-You have access to tools to:
-1. View their schedule (`get_my_schedule`)
-2. Generate/Modify schedule (`generate_new_schedule`) - Use this to create a fresh schedule OR to apply changes to the existing one (e.g. "change monday to math"). Defaults to Weekly, 1 hr/day.
-3. Add deadlines (`add_deadline`) - Use this for ASSIGNMENTS, HOMEWORK, PROJECTS, or generic tasks.
-4. Add exams (`add_exam`) - Use this specifically for EXAMS, MIDTERMS, FINALS, TESTS, or QUIZZES.
-5. View deadlines (`get_upcoming_deadlines`)
 
-Rules:
-- If the user asks about their schedule, use `get_my_schedule` first.
-- If the user adds a generic task or assignment, use `add_deadline`.
-- If the user adds an exam, test, or midterm, use `add_exam`. Ask for topics/syllabus if not provided, but you can proceed without them.
-- Be friendly and encouraging.
-- If you perform an action (like adding a deadline), confirm it to the user.
-- If the user asks for something outside your tools, answer to the best of your ability as a helpful AI assistant.
+You have access to these tools:
+1. get_my_schedule        – View the user's current study schedule.
+2. generate_new_schedule  – Create or modify the schedule based on instructions.
+3. add_event              – Add any academic event:
+     • event_type="deadline" for assignments, homework, projects, generic tasks.
+     • event_type="exam"     for exams, tests, midterms, finals, quizzes.
+     • Always pass uid and date in YYYY-MM-DD format.
+     • For exams: ask for syllabus topics if not yet given, but proceed without them if the user says to skip.
+4. get_upcoming_deadlines – View all upcoming incomplete deadlines.
+5. search_my_notes        – Search the user's uploaded PDFs / study notes.
+
+MEMORY & MULTI-TURN RULES (IMPORTANT):
+- You receive the full recent conversation history before the latest message.
+- Use it. If the user previously started adding an event and you asked a follow-up
+  question (e.g. "what are the topics?"), and they now answer it, piece things
+  together from history and complete the action immediately — do NOT ask again.
+- Never ask for information the user already gave in a previous turn.
+
+Other rules:
+- If the user asks about their schedule, call get_my_schedule first.
+- If the user adds a task/assignment/project → add_event with event_type="deadline".
+- If the user adds an exam/test/midterm/final/quiz → add_event with event_type="exam".
+- If the user asks a study/content question, call search_my_notes first.
+- Always confirm actions back to the user.
+- Be friendly, concise, and encouraging.
 """
 
-tools = [get_my_schedule, generate_new_schedule, add_deadline, add_exam, get_upcoming_deadlines]
+tools = [
+    get_my_schedule,
+    generate_new_schedule,
+    add_event,
+    get_upcoming_deadlines,
+    search_my_notes,
+]
 agent_executor = create_react_agent(llm, tools)
+
+
+# ---------------------------------------------------------------------------
+# Route
+# ---------------------------------------------------------------------------
 
 @router.post("/message")
 async def chat_message(request: ChatRequest):
     try:
-        # Convert conversation history or just send current message
-        # For a truly stateful chat, we'd fetch history from DB. 
-        # For now, we'll behave as a stateless agent per turn + context
-        
-        # Get current date/time for context
         now = datetime.now().isoformat()
-        
-        # Fetch user profile to get valid subjects
+
+        # 1. Fetch user profile for subjects
         user_ref = db.collection("user_profiles").document(request.uid).get()
-        subjects_list = "General" # Default
+        subjects_list = "General"
         if user_ref.exists:
             user_data = user_ref.to_dict()
             subjects = user_data.get("academic_subjects", [])
             if subjects:
                 subjects_list = ", ".join(subjects)
 
-        # Dynamic System Prompt with Subjects
-        dynamic_system_prompt = f"""{SYSTEM_PROMPT}
+        dynamic_prompt = f"""{SYSTEM_PROMPT}
 
-CRITICAL INSTRUCTION:
-The user is enrolled in the following subjects: [{subjects_list}].
-When adding deadlines, tasks, or generating schedules, you MUST ONLY select from these exact subjects.
-Do not invent new subjects. If the user mentions a topic not in this list, try to map it to the closest valid subject or ask for clarification.
+CRITICAL:
+The user is enrolled in: [{subjects_list}].
+When adding events or schedules, ONLY use subjects from this list.
+If the user mentions a topic not in the list, map it to the closest subject or ask.
 """
-        
+
+        # 2. Load conversation history
+        history = _load_history(request.uid, request.session_id or "default")
+
+        # 3. Build message list:  system → history → current user message
+        current_human_msg = (
+            f"Current Date/Time: {now}\n"
+            f"User ID: {request.uid}\n"
+            f"User Name: {request.user_name}\n"
+            f"Request: {request.message}"
+        )
+
         inputs = {
             "messages": [
-                SystemMessage(content=dynamic_system_prompt),
-                HumanMessage(content=f"Current Date/Time: {now}\nUser ID: {request.uid}\nUser Name: {request.user_name}\nRequest: {request.message}")
+                SystemMessage(content=dynamic_prompt),
+                *history,
+                HumanMessage(content=current_human_msg),
             ]
         }
-        
-        # Run agent
-        result = await agent_executor.ainvoke(inputs)
-        
-        # Debugging: Print all messages
-        print("DEBUG: Agent Messages:")
-        for m in result["messages"]:
-            print(f" - {m.type}: {m.content}")
 
-        # Extract last message
+        # 4. Run agent
+        result = await agent_executor.ainvoke(inputs)
+
+        for m in result["messages"]:
+            print(f" [{m.type}]: {str(m.content)[:200]}")
+
         last_message = result["messages"][-1]
         response_text = last_message.content
-        
-        # Fallback: If response is empty, check if the previous message was a ToolMessage
-        # This handles cases where the agent stops after the tool execution without a final summary
+
+        # Fallback if agent stopped after tool without a final message
         if not response_text or response_text.strip() == "":
-             # Check for tool message in the history
-             for m in reversed(result["messages"]):
-                 if m.type == "tool":
-                     response_text = f"Action Completed: {m.content}"
-                     break
-        
+            for m in reversed(result["messages"]):
+                if m.type == "tool":
+                    response_text = f"Done: {m.content}"
+                    break
+
+        # 5. Persist this turn to Firestore
+        _save_turn(
+            uid=request.uid,
+            session_id=request.session_id or "default",
+            user_msg=request.message,
+            ai_msg=response_text,
+        )
+
         return {"response": response_text}
 
     except Exception as e:
         print(f"Chat Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/history/{uid}")
+async def get_chat_history(uid: str, session_id: str = "default"):
+    """
+    Return recent chat messages for a user session.
+    Used by the frontend to restore history on page load/refresh.
+    """
+    try:
+        ref = _history_ref(uid, session_id)
+        docs = (
+            ref.order_by("ts", direction=firestore.Query.ASCENDING)
+            .limit_to_last(HISTORY_TURNS * 2)
+            .get()
+        )
+        messages = []
+        for doc in docs:
+            data = doc.to_dict()
+            ts = data.get("ts")
+            messages.append({
+                "role": data.get("role"),       # "human" | "ai"
+                "content": data.get("content", ""),
+                "ts": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+            })
+        return {"messages": messages}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/history/{uid}")
+async def clear_chat_history(uid: str, session_id: str = "default"):
+    """Clear a user's chat history for a given session."""
+    try:
+        ref = _history_ref(uid, session_id)
+        docs = ref.stream()
+        batch = db.batch()
+        count = 0
+        for doc in docs:
+            batch.delete(doc.reference)
+            count += 1
+        batch.commit()
+        return {"success": True, "deleted": count}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
