@@ -6,6 +6,7 @@ from datetime import datetime
 from utils.llm import llm
 from firebase_admin import firestore
 import json
+import os
 from utils.timeline_logger import log_timeline_event
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -16,6 +17,8 @@ class JobRole(BaseModel):
     match_score: int
     demand: str = "High"
     avg_salary: str = "₹0"
+    url: Optional[str] = None
+    company: Optional[str] = None
 
 class SkillGap(BaseModel):
     missing_skill: str
@@ -89,6 +92,10 @@ async def analyze_jobs(request: JobAnalysisRequest):
         User Interests: {', '.join(interests)}
         Current Skills: {', '.join(skills)}
         
+        CRITICAL RULES:
+        1. DO NOT suggest overlapping or parent/child skill pairs (e.g., if you suggest "Full Stack Developer", DO NOT also suggest "Frontend Developer"). Make sure all 3 roles are distinct paths.
+        2. Pick roles that actually exist in the current job market.
+        
         For each role, provide:
         1. Title
         2. Brief description (max 1 sentence)
@@ -141,7 +148,6 @@ async def analyze_jobs(request: JobAnalysisRequest):
             
         except Exception as e:
             print(f"LLM Error: {e}")
-            # Fallback
             return [
                 JobRole(title="Freelance Developer", description="General web development", match_score=50, avg_salary="₹500/hr"),
                 JobRole(title="Content Creator", description="Creating tech content", match_score=40, avg_salary="₹10k/mo")
@@ -149,6 +155,107 @@ async def analyze_jobs(request: JobAnalysisRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/search/")
+async def search_jobs(query: str, uid: str):
+    """
+    Search real jobs using TheirStack API.
+    Provides India-specific results and maps them to JobRole.
+    """
+    api_key = os.getenv("THEIRSTACK_API_KEY")
+    if not api_key:
+        return []
+
+    try:
+        import httpx
+        url = "https://api.theirstack.com/v1/jobs/search"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # TheirStack POST body requirements:
+        # Require at least one filter like job_title_or
+        # and we can add country_code_or for India
+        payload = {
+            "job_title_or": [query],
+            "company_country_code_or": ["IN"],
+            "posted_at_max_age_days": 30,
+            "limit": 3
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, headers=headers, json=payload, timeout=15.0)
+            
+        if response.status_code != 200:
+            print(f"TheirStack API Error: {response.text}")
+            return []
+            
+        data = response.json()
+        jobs_list = data.get("data", [])
+        
+        # Prepare data for LLM Enhancement
+        extracted_jobs = []
+        for job in jobs_list:
+            title = job.get("job_title", job.get("title", "Unknown Role"))
+            company = job.get("company_name", job.get("company", "Unknown Company"))
+            job_url = job.get("url", job.get("link", ""))
+            extracted_jobs.append({"title": title, "company": company, "url": job_url})
+            
+        # Enhance with LLM for salary and description
+        results = []
+        if extracted_jobs:
+            llm_prompt = f"""
+            I have {len(extracted_jobs)} job listings from India. 
+            For each, provide a 1-sentence engaging description emphasizing the value of this role, and a realistic estimated average salary range in INR (e.g. "₹8-12 LPA" or "₹50k/mo").
+            
+            Jobs:
+            {json.dumps([{"title": j["title"], "company": j["company"]} for j in extracted_jobs])}
+            
+            Return ONLY valid JSON format as an array of objects matching exactly the input order:
+            [
+                {{ "description": "...", "salary": "₹8-12 LPA" }}
+            ]
+            """
+            
+            try:
+                llm_res = llm.invoke(llm_prompt).content
+                if "```json" in llm_res:
+                    llm_res = llm_res.split("```json")[1].split("```")[0]
+                elif "```" in llm_res:
+                    llm_res = llm_res.split("```")[1].split("```")[0]
+                    
+                enhanced_data = json.loads(llm_res.strip())
+                
+                for idx, job in enumerate(extracted_jobs):
+                    enhanced = enhanced_data[idx] if idx < len(enhanced_data) else {}
+                    results.append(JobRole(
+                        title=job["title"],
+                        description=enhanced.get("description", f"Hiring Company: {job['company']}. Click to view details."),
+                        match_score=0,
+                        demand="Live",
+                        avg_salary=enhanced.get("salary", "N/A"),
+                        url=job["url"],
+                        company=job["company"]
+                    ))
+            except Exception as e:
+                print(f"LLM Enhancement Error: {e}")
+                for job in extracted_jobs:
+                    results.append(JobRole(
+                        title=job["title"],
+                        description=f"Hiring Company: {job['company']}. Click to view details.",
+                        match_score=0,
+                        demand="Live",
+                        avg_salary="N/A",
+                        url=job["url"],
+                        company=job["company"]
+                    ))
+            
+        return results
+        
+    except Exception as e:
+        print(f"Search API Error: {e}")
+        return []
 
 @router.post("/gap", response_model=GapAnalysisResponse)
 async def analyze_gap(request: GapAnalysisRequest):

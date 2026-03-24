@@ -137,12 +137,18 @@ async def submit_assessment(request: SubmitRequest):
         weak_topics = []
         
         # Grade answers
+        wrong_by_topic: dict = {}
         for q in request.questions:
             user_ans = next((a['selected'] for a in request.answers if a['question_id'] == q.id), -1)
             if user_ans == q.correct_answer:
                 correct_count += 1
             else:
                 weak_topics.append(q.topic_tag)
+                correct_text = q.options[q.correct_answer] if q.correct_answer < len(q.options) else "N/A"
+                wrong_by_topic.setdefault(q.topic_tag, []).append({
+                    "question": q.question,
+                    "correct": correct_text
+                })
         
         accuracy = (correct_count / total) * 100
         
@@ -158,10 +164,20 @@ async def submit_assessment(request: SubmitRequest):
         
         # Update weak areas
         profile_doc = user_ref.get()
-        current_weak_areas = profile_doc.to_dict().get('weak_areas', []) if profile_doc.exists else []
+        profile_dict = profile_doc.to_dict() if profile_doc.exists else {}
+        current_weak_areas = profile_dict.get('weak_areas', [])
         updated_weak_areas = (current_weak_areas + weak_topics)[-50:]  # Keep last 50
-        
-        user_ref.update({"weak_areas": updated_weak_areas})
+
+        # Merge wrong questions per topic (keep last 5 per topic)
+        existing_wrong_q = profile_dict.get('wrong_questions_by_topic', {})
+        for topic, new_qs in wrong_by_topic.items():
+            merged = existing_wrong_q.get(topic, []) + new_qs
+            existing_wrong_q[topic] = merged[-5:]  # keep most recent 5
+
+        user_ref.update({
+            "weak_areas": updated_weak_areas,
+            "wrong_questions_by_topic": existing_wrong_q
+        })
         
         # Log performance history
         user_ref.collection("stats_history").add({

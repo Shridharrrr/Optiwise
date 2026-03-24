@@ -66,12 +66,27 @@ export function ChatBot() {
         const utterance = new SpeechSynthesisUtterance(clean);
         utterance.rate = 1.05;
         utterance.pitch = 1;
-        // Prefer a natural-sounding voice
+        // Prefer feminine voices across platforms
         const voices = window.speechSynthesis.getVoices();
-        const preferred = voices.find(v =>
-            v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Daniel')
+        const feminineVoice = voices.find(v =>
+            // Chrome / Brave - Google voices
+            v.name === 'Google UK English Female' ||
+            v.name === 'Google US English Female' ||
+            // Windows voices
+            v.name.includes('Zira') ||
+            v.name.includes('Aria') ||
+            v.name.includes('Jenny') ||
+            v.name.includes('Natasha') ||
+            // macOS / iOS voices
+            v.name.includes('Samantha') ||
+            v.name.includes('Karen') ||
+            v.name.includes('Moira') ||
+            v.name.includes('Tessa') ||
+            v.name.includes('Fiona') ||
+            // Generic fallback
+            v.name.toLowerCase().includes('female')
         );
-        if (preferred) utterance.voice = preferred;
+        if (feminineVoice) utterance.voice = feminineVoice;
         window.speechSynthesis.speak(utterance);
     };
 

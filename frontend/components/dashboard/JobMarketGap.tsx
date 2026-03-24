@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Briefcase, TrendingUp, AlertCircle, Plus, CheckCircle2, Loader2, IndianRupee, Target } from 'lucide-react';
+import { Briefcase, TrendingUp, AlertCircle, Plus, CheckCircle2, Loader2, IndianRupee, Target, Search, ExternalLink } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { useMode } from '@/contexts/ModeContext';
@@ -14,6 +14,8 @@ interface JobRole {
     match_score: number;
     demand: string;
     avg_salary: string;
+    url?: string;
+    company?: string;
 }
 
 interface SkillGap {
@@ -35,6 +37,8 @@ export function JobMarketGap() {
     const [loadingJobs, setLoadingJobs] = useState(false);
     const [analyzingGap, setAnalyzingGap] = useState(false);
     const [addingSkill, setAddingSkill] = useState<string | null>(null);
+    const [searchQuery, setSearchQuery] = useState('');
+    const [viewMode, setViewMode] = useState<'recommended' | 'search'>('recommended');
 
     useEffect(() => {
         if (user?.uid) {
@@ -46,6 +50,7 @@ export function JobMarketGap() {
         setLoadingJobs(true);
         setSelectedJob(null);
         setGapAnalysis(null);
+        setViewMode('recommended');
         try {
             const res = await fetch(`${API_BASE_URL}/jobs/${user?.uid}`);
             if (res.ok) {
@@ -80,6 +85,31 @@ export function JobMarketGap() {
         } finally {
             setLoadingJobs(false);
         }
+    };
+
+    const handleSearch = async () => {
+        if (!searchQuery.trim()) return;
+        setLoadingJobs(true);
+        setSelectedJob(null);
+        setGapAnalysis(null);
+        setViewMode('search');
+        try {
+            const res = await fetch(`${API_BASE_URL}/jobs/search/?query=${encodeURIComponent(searchQuery)}&uid=${user?.uid}`);
+            if (res.ok) {
+                const data = await res.json();
+                setJobs(data);
+            }
+        } catch (error) {
+            console.error(error);
+            toast.error("Failed to search jobs");
+        } finally {
+            setLoadingJobs(false);
+        }
+    };
+
+    const handleBackToRecommended = () => {
+        setSearchQuery('');
+        loadStoredJobs();
     };
 
     const handleSelectJob = async (job: JobRole) => {
@@ -161,15 +191,29 @@ export function JobMarketGap() {
                     </div>
                 </div>
 
-                <Button
-                    onClick={generateJobs}
-                    disabled={loadingJobs}
-                    variant="outline"
-                    className="gap-2 h-10"
-                >
-                    {loadingJobs ? <Loader2 className="h-4 w-4 animate-spin" /> : <Briefcase className="h-4 w-4" />}
-                    Generate Job Profiles
-                </Button>
+                <div className="flex items-center gap-3">
+                    <div className="relative">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                        <input
+                            type="text"
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                            placeholder="Find real jobs in India..."
+                            className="h-10 w-[200px] md:w-[260px] pl-9 pr-4 rounded-md border border-input bg-background text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                        />
+                    </div>
+                    {viewMode === 'search' ? (
+                        <Button onClick={handleBackToRecommended} disabled={loadingJobs} variant="outline" className="h-10">
+                            Back
+                        </Button>
+                    ) : (
+                        <Button onClick={generateJobs} disabled={loadingJobs} variant="outline" className="gap-2 h-10 hidden md:flex">
+                            {loadingJobs ? <Loader2 className="h-4 w-4 animate-spin" /> : <Briefcase className="h-4 w-4" />}
+                            Refresh Roles
+                        </Button>
+                    )}
+                </div>
             </div>
 
             <div className="p-6 md:p-8 bg-zinc-50/50 dark:bg-zinc-900/20">
@@ -189,9 +233,9 @@ export function JobMarketGap() {
                 ) : (
                     <div className="space-y-8">
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                            {jobs.map((job) => (
+                            {jobs.map((job, idx) => (
                                 <motion.div
-                                    key={job.title}
+                                    key={`${job.title}-${idx}`}
                                     whileHover={{ y: -2 }}
                                     onClick={() => handleSelectJob(job)}
                                     className={`
@@ -221,21 +265,34 @@ export function JobMarketGap() {
 
                                         <div className="flex items-center justify-between pt-4 border-t border-border/50 text-sm">
                                             <div className="flex items-center gap-1 font-medium text-foreground bg-secondary/50 px-2.5 py-1 rounded-md">
-                                                <IndianRupee className="h-3.5 w-3.5" />
+                                                {job.avg_salary !== "N/A" && <IndianRupee className="h-3.5 w-3.5" />}
                                                 <span>{job.avg_salary.replace('₹', '')}</span>
                                             </div>
-                                            <div className="flex items-center gap-2">
-                                                <div className="flex flex-col items-end">
-                                                    <span className={`text-xs font-bold leading-none ${job.match_score > 70 ? 'text-emerald-600' : 'text-amber-600'}`}>
-                                                        {job.match_score}%
-                                                    </span>
-                                                    <div className="w-16 h-1 bg-secondary rounded-full overflow-hidden mt-1">
-                                                        <div
-                                                            className={`h-full rounded-full ${job.match_score > 70 ? 'bg-emerald-500' : 'bg-amber-500'}`}
-                                                            style={{ width: `${job.match_score}%` }}
-                                                        />
+                                            <div className="flex items-center gap-3">
+                                                {job.url && (
+                                                    <a
+                                                        href={job.url}
+                                                        target="_blank"
+                                                        rel="noreferrer"
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        className="flex items-center gap-1.5 text-[11px] font-semibold text-primary hover:underline bg-primary/10 px-2.5 py-1 rounded"
+                                                    >
+                                                        Apply <ExternalLink className="h-3 w-3" />
+                                                    </a>
+                                                )}
+                                                {job.match_score > 0 && (
+                                                    <div className="flex flex-col items-end">
+                                                        <span className={`text-xs font-bold leading-none ${job.match_score > 70 ? 'text-emerald-600' : 'text-amber-600'}`}>
+                                                            {job.match_score}%
+                                                        </span>
+                                                        <div className="w-16 h-1 bg-secondary rounded-full overflow-hidden mt-1">
+                                                            <div
+                                                                className={`h-full rounded-full ${job.match_score > 70 ? 'bg-emerald-500' : 'bg-amber-500'}`}
+                                                                style={{ width: `${job.match_score}%` }}
+                                                            />
+                                                        </div>
                                                     </div>
-                                                </div>
+                                                )}
                                             </div>
                                         </div>
                                     </div>
@@ -249,63 +306,76 @@ export function JobMarketGap() {
                                     initial={{ opacity: 0, y: 10 }}
                                     animate={{ opacity: 1, y: 0 }}
                                     exit={{ opacity: 0, y: 10 }}
-                                    className="bg-background rounded-xl border border-border p-6 shadow-sm"
+                                    className="bg-card rounded-xl border border-border/50 p-6 md:p-8 shadow-sm"
                                 >
-                                    <div className="flex items-center gap-3 mb-6 pb-4 border-b border-border">
-                                        <div className="bg-primary/10 p-2 rounded-lg">
-                                            <Briefcase className="h-5 w-5 text-primary" />
+                                    <div className="flex items-center gap-4 mb-8 pb-5 border-b border-border/50">
+                                        <div className="bg-primary/10 p-2.5 rounded-xl border border-primary/20">
+                                            <Briefcase className="h-6 w-6 text-primary" />
                                         </div>
-                                        <h3 className="font-semibold text-lg">
-                                            Skill Gap Analysis: <span className="text-primary">{selectedJob.title}</span>
-                                        </h3>
+                                        <div>
+                                            <h3 className="font-bold text-xl text-foreground">
+                                                Skill Gap Analysis
+                                            </h3>
+                                            <p className="text-sm text-muted-foreground mt-0.5">
+                                                Required skills for <span className="text-primary font-medium">{selectedJob.title}</span>
+                                            </p>
+                                        </div>
                                     </div>
 
                                     {analyzingGap ? (
-                                        <div className="py-12 flex flex-col items-center justify-center gap-3 text-muted-foreground">
-                                            <Loader2 className="h-6 w-6 animate-spin text-primary" />
-                                            <span className="text-sm">Identifying missing skills & resources...</span>
+                                        <div className="py-16 flex flex-col items-center justify-center gap-4 text-muted-foreground">
+                                            <div className="bg-primary/5 p-4 rounded-full animate-pulse border border-primary/10">
+                                                <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                                            </div>
+                                            <span className="text-sm font-medium">Identifying missing skills & exact resources...</span>
                                         </div>
                                     ) : (gapAnalysis && (
-                                        <div className="grid grid-cols-1 gap-4">
+                                        <div className="grid grid-cols-1 gap-5">
                                             {gapAnalysis.missing_skills.length > 0 ? (
                                                 gapAnalysis.missing_skills.map((gap, idx) => (
                                                     <motion.div
                                                         key={idx}
                                                         initial={{ opacity: 0, x: -10 }}
                                                         animate={{ opacity: 1, x: 0, transition: { delay: idx * 0.05 } }}
-                                                        className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-4 rounded-lg border border-border hover:border-primary/50 transition-colors bg-card/50"
+                                                        className="flex flex-col md:flex-row md:items-start justify-between gap-5 p-5 rounded-xl border border-border/60 bg-background/50 hover:bg-background hover:border-primary/40 transition-all shadow-sm group"
                                                     >
-                                                        <div className="space-y-1.5 flex-1">
-                                                            <div className="flex items-center gap-2">
-                                                                <AlertCircle className="h-4 w-4 text-amber-500 shrink-0" />
-                                                                <span className="font-semibold text-foreground">{gap.missing_skill}</span>
+                                                        <div className="space-y-2.5 flex-1">
+                                                            <div className="flex items-center gap-3">
+                                                                <div className="bg-amber-500/10 p-1.5 rounded-md border border-amber-500/20">
+                                                                    <AlertCircle className="h-4 w-4 text-amber-500 shrink-0" />
+                                                                </div>
+                                                                <span className="font-bold text-base text-foreground group-hover:text-primary transition-colors">
+                                                                    {gap.missing_skill}
+                                                                </span>
                                                             </div>
-                                                            <p className="text-sm text-muted-foreground pl-6">
+                                                            <p className="text-sm text-muted-foreground pl-[38px] leading-relaxed">
                                                                 {gap.reason}
                                                             </p>
-                                                            <div className="pl-6 pt-1">
-                                                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-medium bg-secondary text-secondary-foreground border border-border">
-                                                                    <TrendingUp className="h-3 w-3" />
-                                                                    Resource: {gap.recommended_resource}
+                                                            <div className="pl-[38px] pt-1">
+                                                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold bg-primary/10 text-primary border border-primary/10">
+                                                                    <TrendingUp className="h-3.5 w-3.5" />
+                                                                    {gap.recommended_resource}
                                                                 </span>
                                                             </div>
                                                         </div>
-                                                        <Button
-                                                            size="sm"
-                                                            variant={addingSkill === gap.missing_skill ? "secondary" : "default"}
-                                                            onClick={() => handleAddSkill(gap.missing_skill)}
-                                                            disabled={addingSkill === gap.missing_skill}
-                                                            className="shrink-0 font-medium"
-                                                        >
-                                                            {addingSkill === gap.missing_skill ? (
-                                                                <Loader2 className="h-4 w-4 animate-spin" />
-                                                            ) : (
-                                                                <>
-                                                                    <Plus className="h-4 w-4 mr-2" />
-                                                                    Add to Goals
-                                                                </>
-                                                            )}
-                                                        </Button>
+                                                        <div className="pl-[38px] md:pl-0 pt-2 md:pt-0">
+                                                            <Button
+                                                                size="sm"
+                                                                variant={addingSkill === gap.missing_skill ? "secondary" : "default"}
+                                                                onClick={() => handleAddSkill(gap.missing_skill)}
+                                                                disabled={addingSkill === gap.missing_skill}
+                                                                className="shrink-0 font-medium shadow-sm w-full md:w-auto"
+                                                            >
+                                                                {addingSkill === gap.missing_skill ? (
+                                                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                                                ) : (
+                                                                    <>
+                                                                        <Plus className="h-4 w-4 mr-1.5" />
+                                                                        Add to Roadmap
+                                                                    </>
+                                                                )}
+                                                            </Button>
+                                                        </div>
                                                     </motion.div>
                                                 ))
                                             ) : (

@@ -160,13 +160,13 @@ export function AssessmentModal({
   if (!isOpen || !exam) return null;
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-white/80 backdrop-blur-md p-4 sm:p-6 transition-all">
+    <div className="fixed inset-0 z-[999] flex items-center justify-center bg-white/80 backdrop-blur-md p-4 sm:p-6 transition-all">
       <motion.div
         initial={{ opacity: 0, scale: 0.95, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 10 }}
         transition={{ duration: 0.4, ease: [0.23, 1, 0.32, 1] }}
-        className="w-full sm:w-[576px] h-[560px] bg-white rounded-3xl overflow-hidden shadow-[0_32px_64px_-16px_rgba(0,0,0,0.3)] flex flex-col max-h-[90vh] border border-white/20 relative"
+        className="w-full sm:w-[650px] h-[600px] bg-white rounded-3xl overflow-hidden shadow-[0_32px_64px_-16px_rgba(0,0,0,0.3)] flex flex-col max-h-[90vh] border border-white/20 relative"
       >
         {/* Progress Bar Header for Quiz */}
         {step === "quiz" && questions.length > 0 && (
@@ -401,7 +401,7 @@ export function AssessmentModal({
                             result.accuracy >= 70 ? "text-emerald-500" : result.accuracy >= 40 ? "text-yellow-500" : "text-red-500"
                           )}
                           strokeLinecap="round"
-                          strokeDasharray={427} 
+                          strokeDasharray={427}
                           initial={{ strokeDashoffset: 427 }}
                           animate={{ strokeDashoffset: 427 - (427 * result.accuracy) / 100 }}
                           transition={{ duration: 1.5, ease: "easeOut", delay: 0.2 }}
