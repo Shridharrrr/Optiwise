@@ -14,12 +14,17 @@ import {
     BookOpen,
     Target,
     Clock,
-    Zap
+    Zap,
+    Mic,
+    MicOff,
+    Volume2,
+    VolumeX
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useMode } from '@/contexts/ModeContext';
 import { API_BASE_URL } from '@/lib/api';
+import { toast } from 'sonner';
 
 interface Message {
     id: string;
@@ -41,9 +46,90 @@ export function ChatBot() {
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputValue, setInputValue] = useState('');
     const [isTyping, setIsTyping] = useState(false);
+    const [isRecording, setIsRecording] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
+    const recognitionRef = useRef<any>(null);
+    const [isTTSEnabled, setIsTTSEnabled] = useState(false);
     const { mode, userProfile, user } = useMode();
+
+    const speak = (text: string) => {
+        if (!isTTSEnabled || typeof window === 'undefined' || !window.speechSynthesis) return;
+        // Strip markdown so it sounds natural
+        const clean = text
+            .replace(/[*_`#>~]/g, '')
+            .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+            .trim();
+        window.speechSynthesis.cancel(); // stop any current speech
+        const utterance = new SpeechSynthesisUtterance(clean);
+        utterance.rate = 1.05;
+        utterance.pitch = 1;
+        // Prefer a natural-sounding voice
+        const voices = window.speechSynthesis.getVoices();
+        const preferred = voices.find(v =>
+            v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Daniel')
+        );
+        if (preferred) utterance.voice = preferred;
+        window.speechSynthesis.speak(utterance);
+    };
+
+    const handleToggleRecording = () => {
+        const SpeechRecognition =
+            (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+        if (!SpeechRecognition) {
+            toast.error('Voice input is not supported in this browser. Please try Chrome, Edge, or Brave.');
+            return;
+        }
+
+        if (isRecording) {
+            recognitionRef.current?.stop();
+            setIsRecording(false);
+            return;
+        }
+
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'en-US';
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 1;
+        recognitionRef.current = recognition;
+
+        recognition.onstart = () => setIsRecording(true);
+        recognition.onend = () => setIsRecording(false);
+
+        recognition.onerror = (event: any) => {
+            setIsRecording(false);
+            switch (event.error) {
+                case 'not-allowed':
+                case 'permission-denied':
+                    toast.error('Microphone access denied. Please allow mic permissions in your browser settings.');
+                    break;
+                case 'network':
+                    toast.error('Network error. Check your internet connection and try again.');
+                    break;
+                case 'no-speech':
+                    toast.info('No speech detected. Please try again.');
+                    break;
+                case 'aborted':
+                    break; // user stopped it manually, no toast needed
+                default:
+                    toast.error(`Voice input error: ${event.error}. Try again.`);
+            }
+        };
+
+        recognition.onresult = (event: any) => {
+            const transcript = event.results[0][0].transcript;
+            setInputValue(transcript);
+            if (inputRef.current) inputRef.current.focus();
+        };
+
+        try {
+            recognition.start();
+        } catch (e) {
+            toast.error('Could not start voice input. Please try again.');
+            setIsRecording(false);
+        }
+    };
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -114,6 +200,7 @@ export function ChatBot() {
             };
 
             setMessages(prev => [...prev, assistantMessage]);
+            speak(data.response);
         } catch (error) {
             console.error('Chat Error:', error);
             const errorMessage: Message = {
@@ -240,6 +327,30 @@ export function ChatBot() {
                                 </div>
                             </div>
                             <div className="flex items-center gap-1">
+                                {/* TTS Toggle */}
+                                <motion.button
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.95 }}
+                                    onClick={() => {
+                                        if (isTTSEnabled) window.speechSynthesis?.cancel();
+                                        setIsTTSEnabled(v => !v);
+                                    }}
+                                    title={isTTSEnabled ? 'Mute bot voice' : 'Enable bot voice'}
+                                    className={cn(
+                                        "rounded-full p-2 transition-colors",
+                                        isTTSEnabled
+                                            ? isAcademic
+                                                ? "bg-white/20 text-white"
+                                                : "bg-primary/20 text-primary"
+                                            : isAcademic
+                                                ? "text-blue-200 hover:bg-white/10 hover:text-white"
+                                                : "text-muted-foreground hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10"
+                                    )}
+                                >
+                                    {isTTSEnabled
+                                        ? <Volume2 className="h-4 w-4" />
+                                        : <VolumeX className="h-4 w-4" />}
+                                </motion.button>
                                 <button
                                     onClick={() => setIsOpen(false)}
                                     className={cn(
@@ -395,6 +506,30 @@ export function ChatBot() {
                                     )}
                                     disabled={isTyping}
                                 />
+                                {/* Mic Button */}
+                                <motion.button
+                                    type="button"
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.95 }}
+                                    onClick={handleToggleRecording}
+                                    disabled={isTyping}
+                                    className={cn(
+                                        "relative flex h-9 w-9 items-center justify-center rounded-full shadow-sm transition-all disabled:cursor-not-allowed",
+                                        isRecording
+                                            ? "bg-red-500 text-white shadow-red-500/40"
+                                            : isAcademic
+                                                ? "bg-blue-50 text-blue-500 hover:bg-blue-100"
+                                                : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300"
+                                    )}
+                                >
+                                    {isRecording && (
+                                        <span className="absolute inset-0 rounded-full bg-red-400 animate-ping opacity-60" />
+                                    )}
+                                    {isRecording
+                                        ? <MicOff className="h-4 w-4 relative z-10" />
+                                        : <Mic className="h-4 w-4" />}
+                                </motion.button>
+                                {/* Send Button */}
                                 <motion.button
                                     whileHover={{ scale: 1.05 }}
                                     whileTap={{ scale: 0.95 }}
